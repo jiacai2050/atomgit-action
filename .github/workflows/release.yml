@@ -1,0 +1,40 @@
+name: Release and Sync Major Tag
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release-and-sync:
+    name: Create Release & Sync Major Tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${GITHUB_REF_NAME}" --generate-notes
+
+      - name: Sync major tag (e.g. v1)
+        run: |
+          TAG_NAME="${GITHUB_REF_NAME}"
+          MAJOR_TAG=$(echo "$TAG_NAME" | cut -d. -f1)
+
+          if [[ "$MAJOR_TAG" =~ ^v[0-9]+$ ]]; then
+            echo "Updating major tag ${MAJOR_TAG} to point to ${TAG_NAME} (${GITHUB_SHA})"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+
+            git tag -fa "$MAJOR_TAG" -m "Update $MAJOR_TAG tag to $TAG_NAME"
+            git push origin "$MAJOR_TAG" --force
+          else
+            echo "Tag ${TAG_NAME} does not match major version format (e.g., v1). Skipping."
+          fi

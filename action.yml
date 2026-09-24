@@ -1,0 +1,38 @@
+name: 'Atomgit Action'
+description: 'Sync a GitHub release (tag, body, and assets) to atomgit after GoReleaser or any release action.'
+
+inputs:
+  tag:
+    description: 'Release tag to sync (e.g. v1.2.0)'
+    required: true
+  owner:
+    description: 'Repository owner (used in API paths)'
+    required: true
+  repo:
+    description: 'Repository name'
+    required: true
+  atomgit_token:
+    description: 'atomgit API token'
+    required: true
+  atomgit_user:
+    description: 'atomgit username for git push. Defaults to owner when the repo belongs to a personal account.'
+    required: false
+  upload_jobs:
+    description: 'Max concurrent asset uploads'
+    required: false
+    default: '4'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Sync release to atomgit
+      shell: bash
+      run: ${{ github.action_path }}/sync-release.sh
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ATOMGIT_TOKEN: ${{ inputs.atomgit_token }}
+        ATOMGIT_USER: ${{ inputs.atomgit_user }}
+        UPLOAD_JOBS: ${{ inputs.upload_jobs }}
+        TAG: ${{ inputs.tag }}
+        OWNER: ${{ inputs.owner }}
+        REPO: ${{ inputs.repo }}
