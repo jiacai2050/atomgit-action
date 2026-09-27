@@ -29,8 +29,9 @@
 
 1. 通过 git 推送 tag 到 atomgit
 2. 创建或更新 release，同步 GitHub 的 release 描述
-3. 从 GitHub 下载 release 附件
-4. 并发上传附件到 atomgit（自动跳过源码归档）
+3. 将 atomgit release 地址和成功上传的附件写入 GitHub Actions job summary
+4. 从 GitHub 下载 release 附件
+5. 并发上传附件到 atomgit（自动跳过源码归档）
 
 ## 完整示例（配合 GoReleaser）
 

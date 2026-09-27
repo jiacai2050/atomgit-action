@@ -14,8 +14,15 @@
 
 set -euo pipefail
 
-# Default ATOMGIT_USER to OWNER when not set (personal repos)
+# Initialize and validate environment variables.
+: "${TAG:?TAG is required}"
+: "${OWNER:?OWNER is required}"
+: "${REPO:?REPO is required}"
+: "${ATOMGIT_TOKEN:?ATOMGIT_TOKEN is required}"
+: "${GH_TOKEN:?GH_TOKEN is required}"
 ATOMGIT_USER="${ATOMGIT_USER:-$OWNER}"
+UPLOAD_JOBS="${UPLOAD_JOBS:-4}"
+GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}"
 
 API="https://api.atomgit.com/api/v5/repos/${OWNER}/${REPO}"
 AUTH="access_token=${ATOMGIT_TOKEN}"
@@ -46,9 +53,19 @@ curl -Sf -X POST \
   -H "Content-Type: application/json" \
   -d "$PAYLOAD" || true
 
+# Add the AtomGit release URL to the GitHub Actions job summary.
+RELEASE_URL="https://atomgit.com/${OWNER}/${REPO}/releases/tag/${TAG}"
+if [[ -n "$GITHUB_STEP_SUMMARY" ]]; then
+  {
+    printf '## AtomGit Release\n\n'
+    printf '[%s](%s)\n' "$RELEASE_URL" "$RELEASE_URL"
+  } >> "$GITHUB_STEP_SUMMARY"
+fi
+
 # Download release assets from GitHub
 tmpdir=$(mktemp -d)
 gh release download "$TAG" --dir "$tmpdir/"
+uploaded_dir=$(mktemp -d)
 
 # Upload one asset to atomgit
 upload_asset() {
@@ -76,18 +93,38 @@ upload_asset() {
     -K "$header_file" \
     --data-binary "@${file}"
   rm -f "$header_file"
+  touch "$UPLOADED_DIR/$name"
   echo "Done: ${name}"
 }
 export -f upload_asset
-export API AUTH TAG
+export API AUTH TAG UPLOADED_DIR="$uploaded_dir"
 
 # Filter out auto-generated source archives, then upload in parallel
-find "$tmpdir" -type f \
+if find "$tmpdir" -type f \
   ! -name "${TAG}.tar.gz" \
   ! -name "${TAG}.zip" \
   ! -name "${TAG}.tar.bz2" \
   ! -name "${TAG}.tar" \
-  | xargs -P "${UPLOAD_JOBS:-4}" -I {} bash -e -c 'upload_asset "$@"' _ {}
+  | xargs -P "$UPLOAD_JOBS" -I {} bash -e -c 'upload_asset "$@"' _ {}
+then
+  upload_status=0
+else
+  upload_status=$?
+fi
+
+if [[ -n "$GITHUB_STEP_SUMMARY" ]]; then
+  {
+    printf '\n### Uploaded assets\n\n'
+    while IFS= read -r -d '' uploaded_file; do
+      printf -- '- `%s`\n' "$(basename "$uploaded_file")"
+    done < <(find "$uploaded_dir" -type f -print0)
+  } >> "$GITHUB_STEP_SUMMARY"
+fi
 
 rm -rf "$tmpdir"
+rm -rf "$uploaded_dir"
+if (( upload_status != 0 )); then
+  echo "One or more asset uploads failed (exit status: ${upload_status})." >&2
+  exit "$upload_status"
+fi
 echo "Done: ${TAG} synced to atomgit."
