@@ -30,8 +30,13 @@ git push --force \
 
 # Get release notes from GitHub
 BODY=$(gh release view "$TAG" --json body -q .body)
+# AtomGit requires a non-empty release body.
+if [[ -z "${BODY//[[:space:]]/}" ]]; then
+  BODY="Release ${TAG}"
+fi
 
-# Create release on atomgit (POST; PATCH returns 405)
+# Create release on atomgit
+# https://docs.atomgit.com/docs/apis/post-api-v-5-repos-owner-repo-releases
 PAYLOAD=$(jq -n --arg tag "$TAG" --arg body "$BODY" \
   '{tag_name: $tag, name: $tag, body: $body}')
 echo "Creating release on atomgit ..."
@@ -65,6 +70,9 @@ upload_asset() {
   # PUT file to the pre-signed URL
   echo "Uploading ${name} ..."
   curl -Sf -X PUT "$upload_url" \
+    --retry 3 \
+    --retry-delay 10 \
+    --retry-all-errors \
     -K "$header_file" \
     --data-binary "@${file}"
   rm -f "$header_file"
@@ -79,7 +87,7 @@ find "$tmpdir" -type f \
   ! -name "${TAG}.zip" \
   ! -name "${TAG}.tar.bz2" \
   ! -name "${TAG}.tar" \
-  | xargs -P "${UPLOAD_JOBS:-4}" -I {} bash -c 'upload_asset "$@"' _ {}
+  | xargs -P "${UPLOAD_JOBS:-4}" -I {} bash -e -c 'upload_asset "$@"' _ {}
 
 rm -rf "$tmpdir"
 echo "Done: ${TAG} synced to atomgit."
