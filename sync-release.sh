@@ -23,9 +23,23 @@ set -euo pipefail
 ATOMGIT_USER="${ATOMGIT_USER:-$OWNER}"
 UPLOAD_JOBS="${UPLOAD_JOBS:-4}"
 GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}"
+if ! [[ "$UPLOAD_JOBS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "UPLOAD_JOBS must be a positive integer." >&2
+  exit 1
+fi
 
 API="https://api.atomgit.com/api/v5/repos/${OWNER}/${REPO}"
 AUTH="access_token=${ATOMGIT_TOKEN}"
+tmpdir=""
+uploaded_dir=""
+failed_dir=""
+release_response=""
+cleanup() {
+  [[ -z "$tmpdir" ]] || rm -rf "$tmpdir"
+  [[ -z "$uploaded_dir" ]] || rm -rf "$uploaded_dir"
+  [[ -z "$release_response" ]] || rm -f "$release_response"
+}
+trap cleanup EXIT
 
 # Push tag to atomgit first.
 # ATOMGIT_USER is the HTTP push username, which may differ from OWNER when
@@ -47,14 +61,30 @@ fi
 PAYLOAD=$(jq -n --arg tag "$TAG" --arg body "$BODY" \
   '{tag_name: $tag, name: $tag, body: $body}')
 echo "Creating release on atomgit ..."
-# || true: release may already exist when re-running the workflow
-curl -Sf -X POST \
+release_response=$(mktemp)
+release_status=$(curl -sS -o "$release_response" -w '%{http_code}' -X POST \
   "${API}/releases?${AUTH}" \
   -H "Content-Type: application/json" \
-  -d "$PAYLOAD" || true
+  -d "$PAYLOAD")
+case "$release_status" in
+  2??)
+    ;;
+  409|422)
+    echo "Release ${TAG} already exists on atomgit; continuing."
+    echo "Atomgit response:"
+    cat "$release_response"
+    ;;
+  *)
+    cat "$release_response" >&2
+    echo "Failed to create release on atomgit (HTTP ${release_status})." >&2
+    exit 1
+    ;;
+esac
+rm -f "$release_response"
+release_response=""
 
 # Add the AtomGit release URL to the GitHub Actions job summary.
-RELEASE_URL="https://atomgit.com/${OWNER}/${REPO}/releases/tag/${TAG}"
+RELEASE_URL="https://atomgit.com/${OWNER}/${REPO}/releases/${TAG}"
 if [[ -n "$GITHUB_STEP_SUMMARY" ]]; then
   {
     printf '## AtomGit Release\n\n'
@@ -66,6 +96,7 @@ fi
 tmpdir=$(mktemp -d)
 gh release download "$TAG" --dir "$tmpdir/"
 uploaded_dir=$(mktemp -d)
+failed_dir=$(mktemp -d)
 
 # Upload one asset to atomgit
 upload_asset() {
@@ -75,8 +106,12 @@ upload_asset() {
 
   # Get pre-signed upload URL
   local upload_info
-  upload_info=$(curl -Sf \
-    "${API}/releases/${TAG}/upload_url?${AUTH}&file_name=${name}")
+  if ! upload_info=$(curl -sS --fail-with-body --get \
+    "${API}/releases/${TAG}/upload_url?${AUTH}" \
+    --data-urlencode "file_name=${name}"); then
+    touch "$FAILED_DIR/$name"
+    return 1
+  fi
 
   local upload_url
   upload_url=$(echo "$upload_info" | jq -r '.url')
@@ -86,18 +121,22 @@ upload_asset() {
 
   # PUT file to the pre-signed URL
   echo "Uploading ${name} ..."
-  curl -Sf -X PUT "$upload_url" \
-    --retry 3 \
-    --retry-delay 10 \
-    --retry-all-errors \
-    -K "$header_file" \
-    --data-binary "@${file}"
+  if ! curl -S --fail-with-body -X PUT "$upload_url" \
+      --retry 3 \
+      --retry-delay 10 \
+      --retry-all-errors \
+      -K "$header_file" \
+      --data-binary "@${file}"; then
+    rm -f "$header_file"
+    touch "$FAILED_DIR/$name"
+    return 1
+  fi
   rm -f "$header_file"
   touch "$UPLOADED_DIR/$name"
   echo "Done: ${name}"
 }
 export -f upload_asset
-export API AUTH TAG UPLOADED_DIR="$uploaded_dir"
+export API AUTH TAG UPLOADED_DIR="$uploaded_dir" FAILED_DIR="$failed_dir"
 
 # Filter out auto-generated source archives, then upload in parallel
 if find "$tmpdir" -type f \
@@ -105,7 +144,9 @@ if find "$tmpdir" -type f \
   ! -name "${TAG}.zip" \
   ! -name "${TAG}.tar.bz2" \
   ! -name "${TAG}.tar" \
-  | xargs -P "$UPLOAD_JOBS" -I {} bash -e -c 'upload_asset "$@"' _ {}
+  -print0 \
+  | xargs -0 -r -P "$UPLOAD_JOBS" -I {} bash -e -c \
+    "upload_asset \"\$1\"" _ {}
 then
   upload_status=0
 else
@@ -116,13 +157,18 @@ if [[ -n "$GITHUB_STEP_SUMMARY" ]]; then
   {
     printf '\n### Uploaded assets\n\n'
     while IFS= read -r -d '' uploaded_file; do
-      printf -- '- `%s`\n' "$(basename "$uploaded_file")"
-    done < <(find "$uploaded_dir" -type f -print0)
+      printf -- "- \`%s\`\n" "$(basename "$uploaded_file")"
+    done < <(find "$uploaded_dir" -type f -print0 | sort -z)
+    failed_file=$(find "$failed_dir" -type f -print -quit)
+    if [[ -n "$failed_file" ]]; then
+      printf '\n### Failed assets\n\n'
+      while IFS= read -r -d '' failed_file; do
+        printf -- "- \`%s\`\n" "$(basename "$failed_file")"
+      done < <(find "$failed_dir" -type f -print0 | sort -z)
+    fi
   } >> "$GITHUB_STEP_SUMMARY"
 fi
 
-rm -rf "$tmpdir"
-rm -rf "$uploaded_dir"
 if (( upload_status != 0 )); then
   echo "One or more asset uploads failed (exit status: ${upload_status})." >&2
   exit "$upload_status"

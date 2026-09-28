@@ -1,0 +1,4 @@
+
+
+check:
+	shellcheck *.sh
